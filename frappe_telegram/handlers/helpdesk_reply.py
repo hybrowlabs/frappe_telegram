@@ -25,9 +25,6 @@ def on_communication_insert(doc, method):
 		msg = f"Reply on Ticket #{doc.reference_name}:\n\n{plain_text}"
 		send_message_api(chat_id, token, msg)
 
-	# Forward files already attached to this Communication (uploaded before the reply was sent)
-	_send_attached_files(doc.doctype, doc.name, chat_id, token)
-
 
 def on_file_insert(doc, method):
 	"""Forward agent-attached files to the Telegram user.
@@ -80,27 +77,23 @@ def on_file_update(doc, method):
 
 
 def on_ticket_update(doc, method):
-	"""Notify Telegram user when their ticket is resolved and close the mapping."""
+	"""Notify Telegram user of ticket status changes and manage mapping lifecycle."""
 	if not doc.has_value_changed("status"):
 		return
 
-	# Check if status changed to a resolved category
-	if doc.status_category != "Resolved":
+	if getattr(doc.flags, "skip_telegram_notify", False):
 		return
 
 	mapping = frappe.db.get_value(
 		"Helpdesk Telegram Ticket",
-		{"ticket": doc.name, "is_open": 1},
-		["name", "telegram_user", "telegram_chat"],
+		{"ticket": doc.name},
+		["name", "telegram_user", "telegram_chat", "is_open"],
 		as_dict=True,
+		order_by="creation desc",
 	)
 	if not mapping:
 		return
 
-	# Close the mapping
-	frappe.db.set_value("Helpdesk Telegram Ticket", mapping.name, "is_open", 0)
-
-	# Send notification to user
 	try:
 		settings = frappe.get_cached_doc("Helpdesk Telegram Settings")
 		if not settings.enabled or not settings.bot:
@@ -114,17 +107,38 @@ def on_ticket_update(doc, method):
 	if not chat_id:
 		return
 
-	keyboard = {
-		"inline_keyboard": [
-			[{"text": "Reopen Ticket", "callback_data": f"reopen_ticket_{doc.name}"}],
-			[{"text": "Create New Ticket", "callback_data": "create_ticket"}],
-		]
-	}
-	send_message_api(
-		chat_id, token,
-		f"Your ticket #{doc.name} has been resolved.",
-		reply_markup=keyboard,
+	status_category = doc.status_category or frappe.get_value(
+		"HD Ticket Status", doc.status, "category"
 	)
+
+	if status_category == "Resolved":
+		if mapping.is_open:
+			frappe.db.set_value("Helpdesk Telegram Ticket", mapping.name, "is_open", 0)
+		keyboard = {
+			"inline_keyboard": [
+				[{"text": "Reopen Ticket", "callback_data": f"reopen_ticket_{doc.name}"}],
+				[{"text": "Create New Ticket", "callback_data": "create_ticket"}],
+			]
+		}
+		send_message_api(
+			chat_id, token,
+			f"Your ticket #{doc.name} has been resolved.",
+			reply_markup=keyboard,
+		)
+
+	elif status_category == "Open" and not mapping.is_open:
+		frappe.db.set_value("Helpdesk Telegram Ticket", mapping.name, "is_open", 1)
+		send_message_api(
+			chat_id, token,
+			f"Your ticket #{doc.name} has been reopened. You can send follow-up messages.",
+		)
+
+	else:
+		if mapping.is_open:
+			send_message_api(
+				chat_id, token,
+				f"Your ticket #{doc.name} status has been updated to: {doc.status}",
+			)
 
 
 # --- Helpers ---
@@ -153,17 +167,6 @@ def _get_telegram_target_for_ticket(ticket_name):
 		return None
 
 	return chat_id, token
-
-
-def _send_attached_files(doctype, name, chat_id, token):
-	"""Send all file attachments on a given document to a Telegram chat."""
-	attachments = frappe.get_all(
-		"File",
-		filters={"attached_to_doctype": doctype, "attached_to_name": name},
-		fields=["name", "file_name", "file_url", "is_private"],
-	)
-	for attachment in attachments:
-		_send_file_doc(attachment, chat_id, token)
 
 
 def _send_file_doc(file_doc, chat_id, token):

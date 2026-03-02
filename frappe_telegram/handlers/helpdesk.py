@@ -898,6 +898,7 @@ def handle_reopen_ticket(callback_data, telegram_user, chat_id, token):
 	try:
 		ticket = frappe.get_doc("HD Ticket", ticket_name)
 		ticket.status = "Open"
+		ticket.flags.skip_telegram_notify = True
 		ticket.save(ignore_permissions=True)
 
 		frappe.db.set_value("Helpdesk Telegram Ticket", mapping, "is_open", 1)
