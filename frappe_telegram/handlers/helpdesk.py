@@ -358,12 +358,16 @@ def map_field_to_meta(field):
 			if linked_doctype == "HD Ticket Status":
 				filters["enabled"] = 1
 			
-			# Get all records
+			# Get all records — for priorities, show highest first
+			order_by = "name"
+			if linked_doctype == "HD Ticket Priority":
+				order_by = "integer_value desc"
+
 			records = frappe.get_all(
 				linked_doctype,
 				filters=filters,
 				fields=["name"],
-				order_by="name"
+				order_by=order_by
 			)
 			
 			if records:
