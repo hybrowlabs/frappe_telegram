@@ -35,11 +35,12 @@ def _ensure_notification_defaults():
     changed = False
 
     for field in notification_fields:
-        # Only set to 1 if the field has never been explicitly saved (NULL in tabSingles)
-        existing = frappe.db.get_value(
-            "Singles", {"doctype": "Helpdesk Telegram Settings", "field": field}, "value"
+        # Only set to 1 if the field has never been explicitly saved (no row in tabSingles)
+        exists = frappe.db.sql(
+            "SELECT value FROM tabSingles WHERE doctype=%s AND field=%s",
+            ("Helpdesk Telegram Settings", field),
         )
-        if existing is None:
+        if not exists:
             settings.set(field, 1)
             changed = True
 
