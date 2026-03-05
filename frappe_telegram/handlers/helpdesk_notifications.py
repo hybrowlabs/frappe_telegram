@@ -371,7 +371,7 @@ def build_rich_status_reopened_message(ticket_name):
 		f"\U0001f504 <b>Ticket Reopened</b>\n\n"
 		f"\U0001f3ab <b>Ticket:</b> #{ticket_name}\n"
 		f"\U0001f4cb <b>Subject:</b> {_esc(ticket.subject)}\n"
-		f"\U0001f7e2 <b>Status:</b> Open\n\n"
+		f"\U0001f7e2 <b>Status:</b> Re-Open\n\n"
 		f"\U0001f4ac Your ticket has been reopened. You can now send follow-up messages."
 	)
 
