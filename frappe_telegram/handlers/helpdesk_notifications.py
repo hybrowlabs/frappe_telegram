@@ -79,7 +79,14 @@ def _get_notification_settings():
 
 
 def _get_notification_recipients(settings):
-	"""Get list of Frappe user emails from the notification_recipients child table."""
+	"""Get list of Frappe user names from the notification_recipients child table.
+
+	Returns user *names* (e.g. 'Administrator', 'user@example.com') which are the
+	primary key of the User doctype.  Notification Log creation needs the email
+	address (User.email) for its internal lookup, so callers that forward values to
+	``enqueue_create_notification`` must resolve names → emails first via
+	``_resolve_user_emails``.
+	"""
 	recipients = []
 	for row in settings.notification_recipients or []:
 		if row.user:
@@ -87,6 +94,27 @@ def _get_notification_recipients(settings):
 	if not recipients:
 		recipients = ["Administrator"]
 	return recipients
+
+
+def _resolve_user_emails(user_names):
+	"""Convert a list of User *names* to their ``email`` field values.
+
+	Frappe's ``_get_user_ids`` (used by ``enqueue_create_notification``) looks up
+	users by the ``email`` column, **not** by ``name``.  For normal users the name
+	IS the email, but for the special ``Administrator`` user the name is
+	'Administrator' while the email is something like 'admin@example.com'.
+
+	Returns a deduplicated list of email strings (skipping blanks).
+	"""
+	if not user_names:
+		return []
+	emails = frappe.get_all(
+		"User",
+		filters={"name": ("in", user_names), "enabled": 1},
+		fields=["email"],
+		pluck="email",
+	)
+	return list({e for e in emails if e})
 
 
 # ── Core notification dispatchers ────────────────────────────────────
@@ -107,27 +135,32 @@ def add_system_comment(ticket_name, content):
 
 
 def send_notification_log(recipients, subject, message, ticket_name):
-	"""Create Notification Log entries for recipients via Frappe's enqueue API.
+	"""Create Notification Log entries for recipients.
 
-	Uses enqueue_create_notification which:
-	- Runs asynchronously via frappe.enqueue (enqueue_after_commit=True)
-	- Triggers publish_realtime for the bell icon in Frappe desk
-	- Respects per-user notification settings
-	- Filters for enabled users only
+	Uses ``make_notification_logs`` **synchronously** so notifications appear
+	immediately without depending on background workers.
+
+	``recipients`` are User *names* (e.g. 'Administrator').  We resolve them to
+	email addresses because Frappe's internal ``_get_user_ids`` queries the User
+	``email`` column, not ``name``.
 	"""
 	try:
-		from frappe.desk.doctype.notification_log.notification_log import enqueue_create_notification
+		from frappe.desk.doctype.notification_log.notification_log import make_notification_logs
 
-		enqueue_create_notification(
-			recipients,
-			{
-				"subject": subject,
-				"type": "Alert",
-				"document_type": "HD Ticket",
-				"document_name": ticket_name,
-				"from_user": "Administrator",
-				"email_content": message,
-			},
+		emails = _resolve_user_emails(recipients)
+		if not emails:
+			return
+
+		make_notification_logs(
+			frappe._dict(
+				subject=subject,
+				type="Alert",
+				document_type="HD Ticket",
+				document_name=ticket_name,
+				from_user="Administrator",
+				email_content=message,
+			),
+			emails,
 		)
 	except Exception:
 		frappe.log_error(frappe.get_traceback(), "Telegram Helpdesk: notification log error")
@@ -180,7 +213,8 @@ def notify_ticket_created(ticket_name, telegram_user_name):
 
 	subject_line = f"\U0001f3ab New Telegram Ticket #{ticket_name}: {_esc(ticket.subject)}"
 	send_notification_log(recipients, subject_line, comment, ticket_name)
-	send_hd_notification(recipients, ticket_name, comment, notification_type="Assignment")
+	hd_msg = f"created a new ticket via Telegram: {_esc(ticket.subject)}"
+	send_hd_notification(recipients, ticket_name, hd_msg, notification_type="Reaction")
 
 
 def notify_status_change(ticket_name, old_status, new_status):
@@ -211,7 +245,8 @@ def notify_status_change(ticket_name, old_status, new_status):
 
 	subject_line = f"\U0001f504 Ticket #{ticket_name}: {_esc(old_status)} \u2192 {_esc(new_status)}"
 	send_notification_log(recipients, subject_line, comment, ticket_name)
-	send_hd_notification(recipients, ticket_name, comment)
+	hd_msg = f"changed ticket status: {_esc(old_status)} \u2192 {_esc(new_status)}"
+	send_hd_notification(recipients, ticket_name, hd_msg, notification_type="Reaction")
 
 
 def notify_ticket_reopened(ticket_name, telegram_user_name):
@@ -240,7 +275,8 @@ def notify_ticket_reopened(ticket_name, telegram_user_name):
 
 	subject_line = f"\U0001f513 Ticket #{ticket_name} REOPENED by {tg_user}"
 	send_notification_log(recipients, subject_line, comment, ticket_name)
-	send_hd_notification(recipients, ticket_name, comment)
+	hd_msg = f"reopened ticket via Telegram"
+	send_hd_notification(recipients, ticket_name, hd_msg, notification_type="Reaction")
 
 
 def notify_user_response(ticket_name, telegram_user_name, message_preview):
@@ -270,7 +306,8 @@ def notify_user_response(ticket_name, telegram_user_name, message_preview):
 
 	subject_line = f"\U0001f4ac Customer response on Ticket #{ticket_name} from {tg_user}"
 	send_notification_log(recipients, subject_line, comment, ticket_name)
-	send_hd_notification(recipients, ticket_name, comment)
+	hd_msg = f"sent a follow-up message via Telegram"
+	send_hd_notification(recipients, ticket_name, hd_msg, notification_type="Reaction")
 
 
 def notify_agent_response(ticket_name, agent_user, message_preview):
@@ -300,7 +337,8 @@ def notify_agent_response(ticket_name, agent_user, message_preview):
 
 	subject_line = f"\U0001f468\u200d\U0001f4bc Agent {agent_name} replied on Ticket #{ticket_name}"
 	send_notification_log(recipients, subject_line, comment, ticket_name)
-	send_hd_notification(recipients, ticket_name, comment)
+	hd_msg = f"replied on Telegram ticket"
+	send_hd_notification(recipients, ticket_name, hd_msg, notification_type="Reaction")
 
 
 # ── Rich Telegram message builders (HTML) ────────────────────────────
