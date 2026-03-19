@@ -31,7 +31,7 @@ def process_update(update_data, token, settings):
 		callback_data = ""
 		user_info = message.get("from", {})
 		chat_info = message.get("chat", {})
-		text = message.get("text", "")
+		text = message.get("text", "") or message.get("caption", "")
 	else:
 		return
 
@@ -109,7 +109,7 @@ def process_update(update_data, token, settings):
 
 	else:
 		# Not in a conversation — check for follow-up to open ticket
-		handle_followup_or_prompt(text, telegram_user, telegram_chat, chat_id, token)
+		handle_followup_or_prompt(text, telegram_user, telegram_chat, chat_id, token, message)
 
 
 # --- User / Chat management ---
@@ -961,9 +961,14 @@ def handle_my_tickets(telegram_user, chat_id, token):
 
 # --- Follow-up messages ---
 
-def handle_followup_or_prompt(text, telegram_user, telegram_chat, chat_id, token):
+def handle_followup_or_prompt(text, telegram_user, telegram_chat, chat_id, token, message=None):
 	"""Handle a message that's not part of a ticket creation conversation."""
-	if not text:
+	# Determine if the message contains an attachment
+	has_attachment = message and (
+		message.get("document") or message.get("photo") or message.get("video")
+	)
+
+	if not text and not has_attachment:
 		return
 
 	# Check for open ticket mapping
@@ -984,10 +989,20 @@ def handle_followup_or_prompt(text, telegram_user, telegram_chat, chat_id, token
 		)
 		sender = state or telegram_user.full_name
 
-		frappe.get_doc({
+		# Download and save attachment if present
+		attachment_file = None
+		if has_attachment:
+			attachment_file = _download_followup_attachment(message, chat_id, token)
+
+		# Build communication content
+		content = text or ""
+		if attachment_file and not content:
+			content = f"[Attachment: {attachment_file.file_name}]"
+
+		comm = frappe.get_doc({
 			"doctype": "Communication",
 			"communication_type": "Communication",
-			"content": text,
+			"content": content,
 			"reference_doctype": "HD Ticket",
 			"reference_name": mapping.ticket,
 			"sender": sender,
@@ -995,13 +1010,21 @@ def handle_followup_or_prompt(text, telegram_user, telegram_chat, chat_id, token
 			"subject": f"Re: {ticket.subject}",
 		}).insert(ignore_permissions=True)
 
+		# Link attachment to the HD Ticket so it's visible in the helpdesk
+		if attachment_file:
+			attachment_file.attached_to_doctype = "HD Ticket"
+			attachment_file.attached_to_name = mapping.ticket
+			attachment_file.save(ignore_permissions=True)
+			frappe.db.commit()
+
 		# Management notifications + rich confirmation
 		try:
 			from frappe_telegram.handlers.helpdesk_notifications import (
 				notify_user_response,
 				build_rich_followup_confirmation,
 			)
-			notify_user_response(mapping.ticket, telegram_user.name, text)
+			preview = text or (f"[Attachment: {attachment_file.file_name}]" if attachment_file else "")
+			notify_user_response(mapping.ticket, telegram_user.name, preview)
 			msg = build_rich_followup_confirmation(mapping.ticket)
 			send_message_api(chat_id, token, msg, parse_mode="HTML")
 		except Exception:
@@ -1009,3 +1032,41 @@ def handle_followup_or_prompt(text, telegram_user, telegram_chat, chat_id, token
 			send_message_api(chat_id, token, f"\u2705 Message added to ticket #{mapping.ticket}")
 	else:
 		send_message_api(chat_id, token, "💬 No open ticket found. Send /start to see options.")
+
+
+def _download_followup_attachment(message, chat_id, token):
+	"""Download a Telegram file attachment and save as a private Frappe File."""
+	file_id = None
+	file_name = None
+
+	if message.get("document"):
+		file_id = message["document"]["file_id"]
+		file_name = message["document"].get("file_name", "document")
+	elif message.get("photo"):
+		file_id = message["photo"][-1]["file_id"]
+		file_name = "photo.jpg"
+	elif message.get("video"):
+		file_id = message["video"]["file_id"]
+		file_name = message["video"].get("file_name", "video.mp4")
+
+	if not file_id:
+		return None
+
+	try:
+		settings = frappe.get_cached_doc("Helpdesk Telegram Settings")
+		bot_doc = frappe.get_doc("Telegram Bot", settings.bot)
+		bot_token = bot_doc.get_password("api_token")
+	except Exception:
+		return None
+
+	tg_file_path = get_file_info(file_id, bot_token)
+	if not tg_file_path:
+		return None
+
+	file_bytes = download_telegram_file(tg_file_path, bot_token)
+	if not file_bytes:
+		return None
+
+	file_doc = save_file_to_disk(file_name, file_bytes, "", "", is_private=1)
+	frappe.db.commit()
+	return file_doc
